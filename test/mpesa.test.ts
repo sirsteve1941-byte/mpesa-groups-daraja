@@ -1,0 +1,14 @@
+import { buildStkBody, parseCallback, configProblems, callbackUrl } from '../src/mpesa'; import a from 'assert';
+const E = { MPESA_BUSINESS_SHORTCODE: '123456', MPESA_TILL_NUMBER: '1739052', MPESA_PASSKEY: 'pk', MPESA_CONSUMER_KEY: 'k', MPESA_CONSUMER_SECRET: 's', MPESA_CALLBACK_URL: 'https://x.test/api/mpesa/callback', MPESA_CALLBACK_TOKEN: 't0k', MPESA_TRANSACTION_TYPE: 'CustomerBuyGoodsOnline' };
+const b = buildStkBody(E, true, { name: 'Wanjiku Kamau-Njeri Ltd', phone: '254712345678' }, 500, '20261002120000');
+a.strictEqual(b.BusinessShortCode, '123456'); a.strictEqual(b.PartyB, '1739052'); a.strictEqual(b.PartyA, '254712345678'); a.strictEqual(b.TransactionType, 'CustomerBuyGoodsOnline');
+a.strictEqual(b.Password, Buffer.from('123456pk20261002120000').toString('base64')); a.ok(b.AccountReference.length <= 12); a.strictEqual(b.CallBackURL, 'https://x.test/api/mpesa/callback?token=t0k');
+a.strictEqual(buildStkBody({ ...E, MPESA_TRANSACTION_TYPE: 'CustomerPayBillOnline' }, false, { name: 'A', phone: '254712345678' }, 5, 'ts').PartyB, '123456');
+a.deepStrictEqual(configProblems(E, true), []); a.ok(configProblems({}, true).length >= 6); a.ok(configProblems({ ...E, MPESA_CALLBACK_URL: 'http://x' }, true).some(p => p.includes('https')));
+a.ok(configProblems({ ...E, MPESA_CALLBACK_TOKEN: '' }, true).includes('missing MPESA_CALLBACK_TOKEN')); a.strictEqual(callbackUrl({ MPESA_CALLBACK_URL: 'https://x/y' }), 'https://x/y');
+const ok = parseCallback({ Body: { stkCallback: { MerchantRequestID: 'm', CheckoutRequestID: 'ws_1', ResultCode: 0, ResultDesc: 'ok', CallbackMetadata: { Item: [{ Name: 'Amount', Value: 490 }, { Name: 'MpesaReceiptNumber', Value: 'QWE123' }] } } } });
+a.deepStrictEqual([ok?.status, ok?.amount, ok?.receipt, ok?.checkoutRequestId], ['completed', 490, 'QWE123', 'ws_1']);
+a.strictEqual(parseCallback({ Body: { stkCallback: { CheckoutRequestID: 'x', ResultCode: 1032, ResultDesc: 'cancelled' } } })?.status, 'cancelled');
+const f = parseCallback({ Body: { stkCallback: { CheckoutRequestID: 'x', ResultCode: 1, ResultDesc: 'low balance' } } }); a.deepStrictEqual([f?.status, f?.amount, f?.receipt], ['failed', 0, null]);
+a.strictEqual(parseCallback({}), null); a.strictEqual(parseCallback(null), null); a.strictEqual(parseCallback({ Body: { stkCallback: {} } }), null);
+console.log('mpesa ok');

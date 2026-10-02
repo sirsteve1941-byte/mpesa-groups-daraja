@@ -1,0 +1,25 @@
+databases:
+  - name: mpesa-groups-db
+    plan: free
+services:
+  - type: web
+    name: mpesa-groups-daraja
+    runtime: node
+    buildCommand: npm install --include=dev && npm run build
+    startCommand: npm start
+    healthCheckPath: /api/health
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase: { name: mpesa-groups-db, property: connectionString }
+      - { key: MPESA_ENV, value: sandbox }
+      - { key: MPESA_CALLBACK_TOKEN, generateValue: true }
+      - { key: NODE_VERSION, value: 20 }
+      - { key: MPESA_TRANSACTION_TYPE, value: CustomerPayBillOnline }
+      - { key: PRODUCTION_VERIFIED, value: "false" }
+      - { key: MPESA_CALLBACK_URL, value: https://mpesa-groups-daraja.onrender.com/api/mpesa/callback }
+      - { key: MPESA_TILL_NUMBER, value: "1739052" }
+      - { key: MPESA_BUSINESS_SHORTCODE, sync: false }
+      - { key: MPESA_CONSUMER_KEY, sync: false }
+      - { key: MPESA_CONSUMER_SECRET, sync: false }
+      - { key: MPESA_PASSKEY, sync: false }
+      - { key: ADMIN_PASSWORD, sync: false }
