@@ -9,7 +9,10 @@ body{margin:0;background:#08251a;color:#f5fff9;font:16px system-ui}main{max-widt
 <script>
 let s={groups:[],sel:0};const cycle=[500,490,480];
 const esc=x=>String(x??'').replace(/[&<>\"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
-async function api(u,o){let r=await fetch(u,o);let j=await r.json();if(!r.ok)throw Error(j.message||'Request failed');return j}
+const API_BASE='https://mpesa-groups-daraja.onrender.com';
+
+async function api(u,o){
+  let r=await fetch(API_BASE+u,{cache:'no-store',...(o||{})});let j=await r.json();if(!r.ok)throw Error(j.message||'Request failed');return j}
 function bal(x){return Math.max(0,(+x.auth||0)-(+x.paid||0))}
 function next(x){let b=bal(x);if(!b)return 0;let step=Number.isInteger(x.step)?x.step:0;if((+x.paid||0)===500&&step===0)step=1;if((+x.paid||0)===990&&step===0)step=2;return Math.min(cycle[Math.min(step,2)],b)}
 async function load(){let d=await api('/api/groups');s.groups=d.groups||[];render()}
