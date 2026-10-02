@@ -14,8 +14,17 @@ function load() { return JSON.parse(fs.readFileSync(DATA, "utf8")); }
 function save(x) { fs.writeFileSync(DATA, JSON.stringify(x, null, 2)); }
 function normalizePhone(p) {
   p = String(p || "").replace(/\s/g, "");
-  if (/^0?7\d{8}$/.test(p)) return p.startsWith("0") ? "254" + p.slice(1) : "254" + p.slice(1);
-  if (/^2547\d{8}$/.test(p)) return p;
+
+  // Accept Kenyan mobile numbers:
+  // 07xxxxxxxx, 01xxxxxxxx, 2547xxxxxxxx, 2541xxxxxxxx
+  if (/^(?:0?[17]\d{8})$/.test(p)) {
+    return "254" + p.replace(/^0/, "");
+  }
+
+  if (/^254[17]\d{8}$/.test(p)) {
+    return p;
+  }
+
   throw Error("Invalid M-Pesa number: " + p);
 }
 function balance(c) { return Math.max(0, Number(c.auth) - Number(c.paid || 0)); }
