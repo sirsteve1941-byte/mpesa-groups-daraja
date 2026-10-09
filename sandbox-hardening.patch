@@ -1,0 +1,748 @@
+diff --git a/.env.example b/.env.example
+index 23131fc76021fe7a41090a275459c50e69699e01..537ce96f5ffef3a9d0890d9e5212029ee30d1185 100644
+--- a/.env.example
++++ b/.env.example
+@@ -3,11 +3,16 @@ MPESA_ENV=sandbox
+ MPESA_CONSUMER_KEY=
+ MPESA_CONSUMER_SECRET=
+ MPESA_PASSKEY=
+-MPESA_BUSINESS_SHORTCODE=
+-MPESA_TILL_NUMBER=
++MPESA_BUSINESS_SHORTCODE=174379
++# MPESA_TILL_NUMBER is not used in sandbox (PayBill). Never put the live Till here: the startup guard refuses to boot.
+ MPESA_TRANSACTION_TYPE=CustomerPayBillOnline
+-MPESA_CALLBACK_URL=https://mpesa-groups-daraja.onrender.com/api/mpesa/callback
++MPESA_CALLBACK_URL=https://mpesa-groups-sandbox.onrender.com/api/mpesa/callback
+ MPESA_CALLBACK_TOKEN=
+ PRODUCTION_VERIFIED=false
+ DATABASE_URL=postgres://user:pass@localhost:5432/mpesa_groups
+ ADMIN_PASSWORD=
++# Requests with no callback after this many seconds become 'unconfirmed' (still locked, never auto-failed or auto-paid)
++UNCONFIRMED_AFTER_SECONDS=300
++SWEEP_INTERVAL_SECONDS=15
++# Optional isolation guards: host fragment of the OTHER environment's database; boot is refused if DATABASE_URL contains it
++# PRODUCTION_DB_HOST=
+diff --git a/.github/workflows/test.yml b/.github/workflows/test.yml
+new file mode 100644
+index 0000000000000000000000000000000000000000..8abb268b820474a06888888c804672de65f15809
+--- /dev/null
++++ b/.github/workflows/test.yml
+@@ -0,0 +1,27 @@
++name: Tests (sandbox, throwaway Postgres)
++on:
++  workflow_dispatch:
++  push:
++    branches: [sandbox-hardening]
++permissions:
++  contents: read
++jobs:
++  test:
++    runs-on: ubuntu-latest
++    services:
++      postgres:
++        image: postgres:16
++        env: { POSTGRES_PASSWORD: test, POSTGRES_DB: mpesa_test }
++        ports: ['5432:5432']
++        options: >-
++          --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 5s --health-retries 10
++    env:
++      DATABASE_URL: postgres://postgres:test@localhost:5432/mpesa_test
++    steps:
++      - uses: actions/checkout@v4
++      - uses: actions/setup-node@v4
++        with: { node-version: 22 }
++      - run: npm install --include=dev --no-audit --no-fund
++      - run: npm run typecheck
++      - run: npm test
++      - run: npm run test:integration
+diff --git a/client/src/App.tsx b/client/src/App.tsx
+index e401e99f04d5131937015ae0d5501471a1cc96cc..a4333c6de410c165ad9d3979162944db34aeccbf 100644
+--- a/client/src/App.tsx
++++ b/client/src/App.tsx
+@@ -13,7 +13,7 @@ async function api(p: string, body?: any): Promise<any> {
+   if (r.status === 401) authRequired();
+   return d;
+ }
+-const Tag = ({ s, c }: { s: string; c?: string }) => <span className={'tag ' + (c || s)}>{s}</span>;
++const Tag = ({ s, c }: { s: string; c?: string }) => <span className={'tag ' + (c || s.replace(/\s+/g, ''))}>{s}</span>;
+ const Results = ({ rows }: { rows: any[] }) => <div className="w"><table><tbody>{rows.map((r, i) => <tr key={i}><td>{r.customer || '-'}</td><td>{KSh(r.amount)}</td><td><Tag s={r.result} /></td><td>{r.detail}</td></tr>)}</tbody></table></div>;
+ function useHash() { const [h, s] = useState(location.hash); useEffect(() => { const f = () => s(location.hash); addEventListener('hashchange', f); return () => removeEventListener('hashchange', f); }, []); return h.split('/'); }
+ 
+@@ -89,7 +89,7 @@ function Group({ id }: { id: number }) {
+     {sum && <p><b>{sum}</b></p>}{out && <Results rows={out} />}
+     <div className="w"><table><thead><tr><th>Customer</th><th>Phone</th><th>Authorized</th><th>Paid</th><th>Balance</th><th>Next</th><th>Status</th><th></th></tr></thead><tbody>
+       {d.customers.map((c: any) => <tr key={c.id}><td>{c.name}</td><td>{c.phone}</td><td>{KSh(c.authorized)}</td><td>{KSh(c.paid)}</td><td>{KSh(c.balance)}</td><td>{c.nextAmount ? KSh(c.nextAmount) : '-'}</td><td><Tag s={c.status} /></td>
+-        <td><button className="s" disabled={busy || !c.nextAmount || c.status === 'Pending'} onClick={() => one(c.id)}>SEND PROMPT</button></td></tr>)}
++        <td><button className="s" disabled={busy || !c.nextAmount || ['Pending', 'Unconfirmed', 'Needs review'].includes(c.status)} onClick={() => one(c.id)}>SEND PROMPT</button></td></tr>)}
+       {!d.customers.length && <tr><td colSpan={8}>No customers. Import a CSV.</td></tr>}</tbody></table></div>
+   </>;
+ }
+@@ -115,5 +115,5 @@ function Import() {
+ function Pays() {
+   const [d, setD] = useState<any[]>([]); useEffect(() => { api('/payments').then(x => setD(Array.isArray(x) ? x : [])); }, []);
+   return <><h2>Payments</h2><div className="w"><table><thead><tr><th>Date</th><th>Customer</th><th>Grp</th><th>Amount</th><th>Status</th><th>Receipt</th><th>Code</th><th>Response</th><th>CheckoutRequestID</th></tr></thead><tbody>
+-    {d.map(p => <tr key={p.id}><td>{new Date(p.created_at).toLocaleString()}</td><td>{p.customer}</td><td>{p.group}</td><td>{KSh(p.amount)}</td><td><Tag s={p.status} c={p.status === 'completed' ? 'Ready' : p.status === 'pending' ? 'Pending' : 'Failed'} /></td><td>{p.receipt}</td><td>{p.result_code}</td><td>{p.result_desc}</td><td>{p.checkout_request_id}</td></tr>)}</tbody></table></div></>;
++    {d.map(p => <tr key={p.id}><td>{new Date(p.created_at).toLocaleString()}</td><td>{p.customer}</td><td>{p.group}</td><td>{KSh(p.amount)}</td><td><Tag s={p.status} c={p.status === 'completed' ? 'Ready' : ['pending', 'initiating'].includes(p.status) ? 'Pending' : ['unconfirmed', 'needs_review'].includes(p.status) ? 'Unconfirmed' : 'Failed'} /></td><td>{p.receipt}</td><td>{p.result_code}</td><td>{p.result_desc}</td><td>{p.checkout_request_id}</td></tr>)}</tbody></table></div></>;
+ }
+diff --git a/client/src/styles.css b/client/src/styles.css
+index f5d750c374adb76c543d06cc55db7db3b3c9c132..f77616e3fe6400c38984b36649a2727c9de0c727 100644
+--- a/client/src/styles.css
++++ b/client/src/styles.css
+@@ -12,3 +12,4 @@ button.s{padding:5px 10px;font-size:13px}button:disabled{opacity:.4;cursor:defau
+ .tag{padding:2px 8px;border-radius:99px;font-size:12px;font-weight:600}.Ready{background:#d9f2e2;color:#075c2b}.Pending{background:#fff0c2;color:#7a5600}.Completed{background:#dbe7ff;color:#1a3f8f}.Failed,.failed{background:#fde0de;color:#9b1c14}.Cancelled{background:#e8e8e8;color:#444}.sent{background:#d9f2e2;color:#075c2b}.skipped{background:#e8e8e8;color:#444}
+ .err{color:#b3261e}.row{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:12px 0}
+ .top{flex-wrap:wrap}main{max-width:1000px;margin:0 auto;padding:16px}.banner{padding:6px 16px;font-weight:700;font-size:13px}.sbx{background:#fff0c2;color:#7a5600}.prod{background:#fde0de;color:#9b1c14}
++.Unconfirmed,.Needsreview{background:#ffe3c2;color:#8a3b00}.TimedOut{background:#e8e8e8;color:#444}
+diff --git a/package.json b/package.json
+index 9cd2285928a6dc5147627f3e730bacb287b803ea..01c8386e65bd209bb0e6223196b4a9b3d7891e48 100644
+--- a/package.json
++++ b/package.json
+@@ -9,7 +9,7 @@
+   "dev:client": "vite client",
+   "build": "tsc -p tsconfig.json && vite build client",
+   "start": "node dist/server.js",
+-  "test": "tsx test/lib.test.ts && tsx test/mpesa.test.ts",
++  "test": "tsx test/lib.test.ts && tsx test/mpesa.test.ts && tsx test/guard.test.ts",
+   "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p client/tsconfig.json --noEmit",
+   "lint": "npm run typecheck",
+   "test:integration": "tsx test/integration.test.ts"
+diff --git a/render.sandbox.yaml b/render.sandbox.yaml
+new file mode 100644
+index 0000000000000000000000000000000000000000..5910493598f56eab2c679595fabd2d32c11d16f5
+--- /dev/null
++++ b/render.sandbox.yaml
+@@ -0,0 +1,29 @@
++# SANDBOX-ONLY Render blueprint. Separate service + separate database from production.
++# Create it from the Render dashboard: New > Blueprint > pick this repo and the branch, set the blueprint path to render.sandbox.yaml.
++# It does not touch the existing production service (mpesa-groups-daraja) or its database.
++databases:
++  - name: mpesa-groups-sandbox-db
++    plan: free
++services:
++  - type: web
++    name: mpesa-groups-sandbox
++    runtime: node
++    branch: sandbox-hardening
++    buildCommand: npm install --include=dev && npm run build
++    startCommand: npm start
++    healthCheckPath: /api/health
++    envVars:
++      - key: DATABASE_URL
++        fromDatabase: { name: mpesa-groups-sandbox-db, property: connectionString }
++      - { key: MPESA_ENV, value: sandbox }
++      - { key: MPESA_BUSINESS_SHORTCODE, value: "174379" }
++      - { key: MPESA_TRANSACTION_TYPE, value: CustomerPayBillOnline }
++      - { key: MPESA_CALLBACK_URL, value: https://mpesa-groups-sandbox.onrender.com/api/mpesa/callback }
++      - { key: MPESA_CALLBACK_TOKEN, generateValue: true }
++      - { key: NODE_VERSION, value: 20 }
++      - { key: PRODUCTION_VERIFIED, value: "false" }
++      # Paste the SANDBOX app's key/secret and the sandbox passkey (Daraja portal > your sandbox app) in the dashboard only.
++      - { key: MPESA_CONSUMER_KEY, sync: false }
++      - { key: MPESA_CONSUMER_SECRET, sync: false }
++      - { key: MPESA_PASSKEY, sync: false }
++      - { key: ADMIN_PASSWORD, sync: false }
+diff --git a/src/guard.ts b/src/guard.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..df85c5d4be2e870c5afb7327dd85570903d9b0aa
+--- /dev/null
++++ b/src/guard.ts
+@@ -0,0 +1,32 @@
++// Startup guard: keeps sandbox and live payment identifiers apart.
++// Pure function so it can be unit-tested; server.ts exits if it returns problems.
++export type Env = Record<string, string | undefined>;
++export const SANDBOX_SHORTCODE = '174379';
++export const LIVE_IDENTIFIERS = ['1739052']; // live Till; extend with LIVE_PAYMENT_IDENTIFIERS=a,b
++const SECRET_KEYS = new Set(['MPESA_CONSUMER_KEY', 'MPESA_CONSUMER_SECRET', 'MPESA_PASSKEY', 'MPESA_CALLBACK_TOKEN', 'ADMIN_PASSWORD']);
++
++export function guardProblems(E: Env): string[] {
++  const p: string[] = [];
++  const env = E.MPESA_ENV || 'sandbox';
++  if (env !== 'sandbox' && env !== 'production') return ['MPESA_ENV must be "sandbox" or "production"'];
++  const base = E.MPESA_BASE_URL || '';
++  if (env === 'sandbox') {
++    const live = [...LIVE_IDENTIFIERS, ...(E.LIVE_PAYMENT_IDENTIFIERS || '').split(',').map(s => s.trim()).filter(Boolean)];
++    if (E.MPESA_BUSINESS_SHORTCODE && E.MPESA_BUSINESS_SHORTCODE !== SANDBOX_SHORTCODE) p.push('sandbox MPESA_BUSINESS_SHORTCODE must be ' + SANDBOX_SHORTCODE);
++    if (E.MPESA_TILL_NUMBER && E.MPESA_TILL_NUMBER !== SANDBOX_SHORTCODE) p.push('sandbox MPESA_TILL_NUMBER must be unset or ' + SANDBOX_SHORTCODE);
++    if (E.MPESA_TRANSACTION_TYPE && E.MPESA_TRANSACTION_TYPE !== 'CustomerPayBillOnline') p.push('sandbox MPESA_TRANSACTION_TYPE must be CustomerPayBillOnline');
++    if (/safaricom\.co\.ke/i.test(base) && !/^https:\/\/sandbox\.safaricom\.co\.ke(\/|$)/i.test(base)) p.push('sandbox MPESA_BASE_URL must not point at the live Safaricom API');
++    for (const [k, v] of Object.entries(E)) {
++      if (!v || SECRET_KEYS.has(k)) continue;
++      if (live.some(id => new RegExp('(?<!\\d)' + id.replace(/[^\w]/g, '') + '(?!\\d)').test(v))) p.push(k + ' contains a live payment identifier (value not shown)');
++    }
++    const prodDb = (E.PRODUCTION_DB_HOST || '').trim();
++    if (prodDb && (E.DATABASE_URL || '').includes(prodDb)) p.push('sandbox DATABASE_URL points at the production database host');
++  } else {
++    if (E.MPESA_BUSINESS_SHORTCODE === SANDBOX_SHORTCODE) p.push('production must not use the sandbox shortcode ' + SANDBOX_SHORTCODE);
++    if (base && !/^https:\/\/api\.safaricom\.co\.ke(\/|$)/i.test(base)) p.push('production MPESA_BASE_URL must be unset or the live Safaricom API');
++    const sbDb = (E.SANDBOX_DB_HOST || '').trim();
++    if (sbDb && (E.DATABASE_URL || '').includes(sbDb)) p.push('production DATABASE_URL points at the sandbox database host');
++  }
++  return p;
++}
+diff --git a/src/mpesa.ts b/src/mpesa.ts
+index 6ab756db216dbd425e013e4b5a675fb9eb0d32a7..7b4180432e81cd125c6dda5fc40b2a4e81fa69a5 100644
+--- a/src/mpesa.ts
++++ b/src/mpesa.ts
+@@ -25,8 +25,19 @@ export function buildStkBody(E: Env, isProd: boolean, c: { name: string; phone:
+ }
+ export function parseCallback(body: any) {
+   const cb = body?.Body?.stkCallback; if (!cb?.CheckoutRequestID) return null;
+-  const items: any[] = cb.CallbackMetadata?.Item || [], get = (n: string) => items.find(i => i.Name === n)?.Value;
+-  const code = Number(cb.ResultCode);
+-  return { checkoutRequestId: String(cb.CheckoutRequestID), code, status: code === 0 ? 'completed' : code === 1032 ? 'cancelled' : 'failed',
+-    desc: String(cb.ResultDesc ?? ''), receipt: (get('MpesaReceiptNumber') as string) || null, amount: Number(get('Amount')) || 0 };
++  const items: any[] = Array.isArray(cb.CallbackMetadata?.Item) ? cb.CallbackMetadata.Item : [], get = (n: string) => items.find(i => i?.Name === n)?.Value;
++  const code = Number(cb.ResultCode); if (!Number.isInteger(code)) return null;
++  const rawAmt = get('Amount'), amt = rawAmt === undefined || rawAmt === null || rawAmt === '' ? NaN : Number(rawAmt);
++  const rawRcpt = get('MpesaReceiptNumber');
++  return { checkoutRequestId: String(cb.CheckoutRequestID), merchantRequestId: cb.MerchantRequestID ? String(cb.MerchantRequestID) : null, code,
++    status: code === 0 ? 'completed' : code === 1032 ? 'cancelled' : code === 1037 ? 'timed_out' : 'failed', desc: String(cb.ResultDesc ?? '').slice(0, 300),
++    receipt: typeof rawRcpt === 'string' && rawRcpt.trim() ? rawRcpt.trim() : null, amount: Number.isFinite(amt) ? amt : null };
++}
++// Copy of a callback body that is safe to store: customer phone numbers are masked.
++export function redactCallback(body: any) {
++  try {
++    const c = JSON.parse(JSON.stringify(body ?? null)), items = c?.Body?.stkCallback?.CallbackMetadata?.Item;
++    if (Array.isArray(items)) for (const i of items) if (i && i.Name === 'PhoneNumber') i.Value = String(i.Value).replace(/\d(?=\d{3})/g, '*');
++    return c;
++  } catch { return null; }
+ }
+diff --git a/src/server.ts b/src/server.ts
+index 42d8fe7bd4efaccb771c8e279098cdc58876404c..30ab7a96ab49a906e9eee33b59c8b1f758ed9be3 100644
+--- a/src/server.ts
++++ b/src/server.ts
+@@ -4,8 +4,10 @@ import express from 'express';
+ import { Pool } from 'pg';
+ import rateLimit from 'express-rate-limit';
+ import * as L from './lib';
+-import { buildStkBody, parseCallback, configProblems } from './mpesa';
++import { buildStkBody, parseCallback, configProblems, redactCallback } from './mpesa';
++import { guardProblems } from './guard';
+ const E = process.env, isProd = E.MPESA_ENV === 'production';
++{ const gp = guardProblems(E); if (gp.length) { console.error('STARTUP GUARD FAILED:\n - ' + gp.join('\n - ')); process.exit(1); } }
+ const pool = new Pool({ connectionString: E.DATABASE_URL, ssl: E.DATABASE_SSL === 'true' ? { rejectUnauthorized: false } : false });
+ const q = (t: string, p?: any[]) => pool.query(t, p);
+ const ev = (k: string) => isProd ? null : q('INSERT INTO events(kind,count,last_at) VALUES($1,1,now()) ON CONFLICT(kind) DO UPDATE SET count=events.count+1,last_at=now()', [k]);
+@@ -39,11 +41,25 @@ DROP TRIGGER IF EXISTS customers_group_limit ON customers;
+ CREATE TRIGGER customers_group_limit BEFORE INSERT OR UPDATE OF group_id ON customers FOR EACH ROW EXECUTE FUNCTION enforce_group_limit();
+ CREATE TABLE IF NOT EXISTS events(kind TEXT PRIMARY KEY, count INT NOT NULL DEFAULT 0, last_at TIMESTAMPTZ);
+ CREATE TABLE IF NOT EXISTS payments(id SERIAL PRIMARY KEY, customer_id INT REFERENCES customers(id) ON DELETE CASCADE, amount INT NOT NULL, status TEXT NOT NULL,
+- merchant_request_id TEXT, checkout_request_id TEXT UNIQUE, receipt TEXT, result_code INT, result_desc TEXT, created_at TIMESTAMPTZ DEFAULT now(), updated_at TIMESTAMPTZ DEFAULT now());`;
++ merchant_request_id TEXT, checkout_request_id TEXT UNIQUE, receipt TEXT, result_code INT, result_desc TEXT, created_at TIMESTAMPTZ DEFAULT now(), updated_at TIMESTAMPTZ DEFAULT now());
++ALTER TABLE payments ADD COLUMN IF NOT EXISTS review_reason TEXT;
++ALTER TABLE payments ADD COLUMN IF NOT EXISTS callback_amount INT;
++ALTER TABLE payments ADD COLUMN IF NOT EXISTS callback_receipt TEXT;
++CREATE TABLE IF NOT EXISTS callback_log(id SERIAL PRIMARY KEY, received_at TIMESTAMPTZ DEFAULT now(), checkout_request_id TEXT, merchant_request_id TEXT, result_code INT, outcome TEXT NOT NULL DEFAULT 'received', detail TEXT, payload JSONB);
++DO $$ BEGIN
++ IF EXISTS (SELECT 1 FROM payments WHERE receipt IS NOT NULL GROUP BY receipt HAVING count(*)>1) THEN RAISE WARNING 'payments_receipt_uniq not created: duplicate receipts exist';
++ ELSE CREATE UNIQUE INDEX IF NOT EXISTS payments_receipt_uniq ON payments(receipt) WHERE receipt IS NOT NULL; END IF;
++ IF EXISTS (SELECT 1 FROM payments WHERE status IN ('initiating','pending','unconfirmed','needs_review') GROUP BY customer_id HAVING count(*)>1) THEN RAISE WARNING 'payments_one_unresolved not created: customers with several unresolved payments exist';
++ ELSE CREATE UNIQUE INDEX IF NOT EXISTS payments_one_unresolved ON payments(customer_id) WHERE status IN ('initiating','pending','unconfirmed','needs_review'); END IF;
++END $$;`;
++const UNRES = `('initiating','pending','unconfirmed','needs_review')`;
++const CUSTQ = `SELECT c.*,(SELECT p.status FROM payments p WHERE p.customer_id=c.id AND p.status IN ${UNRES} ORDER BY p.id DESC LIMIT 1) AS unresolved FROM customers c`;
++const UNCONFIRMED_AFTER = Number(E.UNCONFIRMED_AFTER_SECONDS) > 0 ? Number(E.UNCONFIRMED_AFTER_SECONDS) : 300;
+ 
+ const view = c => {
+-  const bal = L.balance(c), pend = !!c.pending_checkout_id && (!c.pending_since || Date.now() - new Date(c.pending_since).getTime() < 600000);
+-  const status = bal <= 0 ? 'Completed' : pend ? 'Pending' : c.last_status === 'cancelled' ? 'Cancelled' : c.last_status === 'failed' ? 'Failed' : 'Ready';
++  const bal = L.balance(c), u = c.unresolved;
++  const status = bal <= 0 ? 'Completed' : (u === 'initiating' || u === 'pending') ? 'Pending' : u === 'unconfirmed' ? 'Unconfirmed' : u === 'needs_review' ? 'Needs review'
++    : c.last_status === 'cancelled' ? 'Cancelled' : c.last_status === 'timed_out' ? 'Timed out' : c.last_status === 'failed' ? 'Failed' : 'Ready';
+   return { id: c.id, group: c.group_id, name: c.name, phone: c.phone, authorized: c.authorized, paid: c.paid, balance: bal, nextAmount: L.nextAmount(c), cycleStep: c.cycle_step, status, lastReceipt: c.last_receipt };
+ };
+ 
+@@ -52,8 +68,8 @@ const base = () => isProd ? 'https://api.safaricom.co.ke' : (E.MPESA_BASE_URL ||
+ let tok = { v: null, exp: 0 };
+ async function token() {
+   if (tok.v && Date.now() < tok.exp) return tok.v;
+-  const r = await fetch(base() + '/oauth/v1/generate?grant_type=client_credentials', { headers: { Authorization: 'Basic ' + Buffer.from(E.MPESA_CONSUMER_KEY + ':' + E.MPESA_CONSUMER_SECRET).toString('base64') } });
+-  if (!r.ok) throw new Error('OAuth failed (HTTP ' + r.status + '), check consumer key/secret and MPESA_ENV');
++  let r; try { r = await fetch(base() + '/oauth/v1/generate?grant_type=client_credentials', { headers: { Authorization: 'Basic ' + Buffer.from(E.MPESA_CONSUMER_KEY + ':' + E.MPESA_CONSUMER_SECRET).toString('base64') } }); } catch (e: any) { throw Object.assign(new Error('OAuth request error: ' + e.message), { stage: 'auth' }); }
++  if (!r.ok) throw Object.assign(new Error('OAuth failed (HTTP ' + r.status + '), check consumer key/secret and MPESA_ENV'), { stage: 'auth' });
+   const d = await r.json();
+   tok = { v: d.access_token, exp: Date.now() + (Number(d.expires_in || 3599) - 60) * 1000 };
+   return tok.v;
+@@ -66,48 +82,60 @@ async function daraja(c, amount) {
+ 
+ async function sendPrompt(id) {
+   const out = (c, amount, result, detail, extra = {}) => ({ customerId: c?.id, customer: c?.name, amount, result, detail, ...extra });
+-  const { rows: [c] } = await q(`UPDATE customers SET pending_checkout_id='LOCK',pending_since=now() WHERE id=$1 AND (pending_checkout_id IS NULL OR pending_since<now()-interval '10 minutes') RETURNING *`, [id]);
+-  if (!c) {
+-    const { rows: [e] } = await q('SELECT * FROM customers WHERE id=$1', [id]);
+-    return e ? out(e, L.nextAmount(e), 'skipped', 'Pending STK request already exists') : out(null, 0, 'failed', 'Customer not found');
+-  }
+-  const release = (s?: string) => q('UPDATE customers SET pending_checkout_id=NULL,pending_since=NULL,last_status=COALESCE($2,last_status) WHERE id=$1', [c.id, s || null]);
+-  const amount = L.nextAmount(c);
+-  if (amount <= 0) { await release(); return out(c, 0, 'skipped', 'Balance is zero'); }
+-  if (!L.normPhone(c.phone)) { await release(); return out(c, amount, 'failed', 'Invalid phone number, not sent to Safaricom'); }
+-  const problems = configProblems(E, isProd);
+-  if (problems.length) { await release(); return out(c, amount, 'failed', 'Server not configured: ' + problems.join('; ')); }
+-  if (isProd && E.PRODUCTION_VERIFIED !== 'true') { await release(); return out(c, amount, 'failed', 'Production is locked: finish the sandbox verification checklist, then set PRODUCTION_VERIFIED=true'); }
++  // Phase 1: under a row lock, validate and create a durable 'initiating' record. The record (not a timer) is the lock:
++  // it stays unresolved until a callback or an operator resolves it.
++  const cl = await pool.connect(); let c, amount, pid;
++  try {
++    await cl.query('BEGIN');
++    c = (await cl.query('SELECT * FROM customers WHERE id=$1 FOR UPDATE', [id])).rows[0];
++    if (!c) { await cl.query('ROLLBACK'); return out(null, 0, 'failed', 'Customer not found'); }
++    amount = L.nextAmount(c);
++    const open = (await cl.query(`SELECT status FROM payments WHERE customer_id=$1 AND status IN ${UNRES} LIMIT 1`, [id])).rows[0];
++    if (open) { await cl.query('ROLLBACK'); return out(c, amount, 'skipped', open.status === 'pending' || open.status === 'initiating' ? 'Pending STK request already exists' : `Previous request is ${open.status} and must be reconciled before a new prompt`); }
++    const stop = (result: string, detail: string) => cl.query('ROLLBACK').then(() => out(c, amount, result, detail));
++    if (amount <= 0) return await stop('skipped', 'Balance is zero');
++    if (!L.normPhone(c.phone)) return await stop('failed', 'Invalid phone number, not sent to Safaricom');
++    const problems = configProblems(E, isProd);
++    if (problems.length) return await stop('failed', 'Server not configured: ' + problems.join('; '));
++    if (isProd && E.PRODUCTION_VERIFIED !== 'true') return await stop('failed', 'Production is locked: finish the sandbox verification checklist, then set PRODUCTION_VERIFIED=true');
++    pid = (await cl.query(`INSERT INTO payments(customer_id,amount,status,result_desc) VALUES($1,$2,'initiating','Request being sent') RETURNING id`, [id, amount])).rows[0].id;
++    await cl.query('COMMIT');
++  } catch (e: any) {
++    await cl.query('ROLLBACK').catch(() => {});
++    if (e.code === '23505') return out(c, amount, 'skipped', 'Pending STK request already exists');
++    throw e;
++  } finally { cl.release(); }
++
++  // Phase 2: call Daraja. Nothing here credits the customer; only a validated callback does.
++  const unconfirmed = (why: string) => q(`UPDATE payments SET status='unconfirmed',result_desc=$2,updated_at=now() WHERE id=$1 AND status IN ('initiating','pending')`, [pid, why.slice(0, 300)]);
++  const failedNow = async (why: string, d: any = {}) => {
++    await q(`UPDATE payments SET status='failed',merchant_request_id=COALESCE($3,merchant_request_id),result_code=$4,result_desc=$2,updated_at=now() WHERE id=$1 AND status='initiating'`, [pid, why.slice(0, 300), d.MerchantRequestID || null, Number(d.ResponseCode) || null]);
++    await q(`UPDATE customers SET last_status='failed' WHERE id=$1`, [c.id]);
++  };
+   let r;
+-  try { r = await daraja(c, amount); } catch (e) { await release('failed'); log('STK error customer', c.id, e.message); return out(c, amount, 'failed', 'Safaricom request error: ' + e.message); }
++  try { r = await daraja(c, amount); } catch (e: any) {
++    if (e.stage === 'auth') { await failedNow(e.message); log('STK not sent (auth) customer', c.id, e.message); return out(c, amount, 'failed', 'Safaricom authentication error: ' + e.message); }
++    // The request may have reached Safaricom. Do NOT treat this as a failure or release the lock.
++    await unconfirmed('Outcome unknown (' + e.message + ')'); log('STK outcome unknown customer', c.id, e.message);
++    return out(c, amount, 'failed', 'Safaricom request error, outcome unknown. Request left unconfirmed; check the M-Pesa statement before retrying');
++  }
+   const d = r.data, desc = d.ResponseDescription || d.errorMessage || 'HTTP ' + r.status;
+   log('STK customer', c.id, 'http', r.status, 'ResponseCode', d.ResponseCode || d.errorCode, 'desc', desc, 'MRID', d.MerchantRequestID, 'CRID', d.CheckoutRequestID);
+   if (r.status === 200 && d.ResponseCode === '0') {
++    if (!d.CheckoutRequestID || !d.MerchantRequestID) { await unconfirmed('Accepted without request IDs'); return out(c, amount, 'failed', 'Safaricom accepted the request without request IDs; left unconfirmed'); }
+     try {
+-      await q(`INSERT INTO payments(customer_id,amount,status,merchant_request_id,checkout_request_id,result_code,result_desc) VALUES($1,$2,'pending',$3,$4,0,$5)`, [c.id, amount, d.MerchantRequestID, d.CheckoutRequestID, desc]);
+-      await q('UPDATE customers SET pending_checkout_id=$2 WHERE id=$1', [c.id, d.CheckoutRequestID]);
++      // 'accepted' only means Safaricom queued the prompt. The payment stays pending until a validated callback arrives.
++      await q(`UPDATE payments SET status=CASE WHEN status='initiating' THEN 'pending' ELSE status END,merchant_request_id=$2,checkout_request_id=$3,result_code=0,result_desc=$4,updated_at=now() WHERE id=$1 AND status IN ('initiating','unconfirmed')`, [pid, d.MerchantRequestID, d.CheckoutRequestID, desc.slice(0, 300)]);
+     } catch (e: any) {
+-      // The external STK request may already have succeeded. Reconcile by
+-      // CheckoutRequestID before leaving the customer locked.
+-      try {
+-        const { rows: [existing] } = await q('SELECT id FROM payments WHERE checkout_request_id=$1', [d.CheckoutRequestID]);
+-        if (existing) {
+-          await q('UPDATE customers SET pending_checkout_id=$2,pending_since=now() WHERE id=$1', [c.id, d.CheckoutRequestID]);
+-          log('Recovered recorded STK after local write error. customer', c.id, 'CRID', d.CheckoutRequestID);
+-          return out(c, amount, 'sent', 'Prompt sent and payment record recovered', { checkoutRequestId: d.CheckoutRequestID, recovered: true });
+-        }
+-      } catch (reconcileError: any) { log('CRITICAL: STK reconciliation failed. customer', c.id, 'CRID', d.CheckoutRequestID, reconcileError.message); }
+-      // Keep the temporary lock for its 10-minute safety window. This avoids
+-      // accidentally sending a duplicate prompt while the operator checks
+-      // the Safaricom transaction. It expires automatically.
+-      log('CRITICAL: STK sent but not recorded. customer', c.id, 'CRID', d.CheckoutRequestID, e.message);
+-      return out(c, amount, 'failed', 'Prompt sent but could not be recorded; check Safaricom statement before retrying');
++      // Row stays 'initiating'; the sweeper turns it into 'unconfirmed'. The customer stays locked either way.
++      log('CRITICAL: STK sent but IDs not recorded. customer', c.id, 'CRID', d.CheckoutRequestID, e.message);
++      return out(c, amount, 'failed', 'Prompt sent but could not be recorded; check the Safaricom statement before retrying');
+     }
+     await ev('stk_accepted');
+     return out(c, amount, 'sent', d.CustomerMessage || desc, { checkoutRequestId: d.CheckoutRequestID });
+   }
+-  await q(`INSERT INTO payments(customer_id,amount,status,merchant_request_id,result_code,result_desc) VALUES($1,$2,'failed',$3,$4,$5)`, [c.id, amount, d.MerchantRequestID || null, Number(d.ResponseCode) || null, desc]);
+-  await release('failed');
++  if (r.status >= 500) { await unconfirmed('Safaricom HTTP ' + r.status + ', outcome unknown'); return out(c, amount, 'failed', 'Safaricom error HTTP ' + r.status + ', outcome unknown. Request left unconfirmed; check the M-Pesa statement before retrying'); }
++  await failedNow(desc, d);
+   return out(c, amount, 'failed', 'Safaricom: ' + desc, { httpStatus: r.status, responseCode: d.ResponseCode || d.errorCode });
+ }
+ 
+@@ -123,34 +151,63 @@ app.post('/api/stk-push-group', stkLimit, ah(async (req, res) => {
+   res.json({ group: g, sent: n('sent'), failed: n('failed'), skipped: n('skipped'), results });
+ }));
+ 
+-async function processCallback(cb: NonNullable<ReturnType<typeof parseCallback>>) {
+-  const cl = await pool.connect();
++// Credit exactly the amount our own payment row recorded. Caller holds the payment row lock inside a transaction.
++async function completePayment(cl, p, receipt: string, amount: number, desc: string) {
++  await cl.query(`UPDATE payments SET status='completed',receipt=$2,callback_receipt=$2,callback_amount=$3,result_code=0,result_desc=$4,review_reason=NULL,updated_at=now() WHERE id=$1`, [p.id, receipt, amount, desc.slice(0, 300)]);
++  await cl.query(`UPDATE customers SET paid=LEAST(authorized,paid+$2),cycle_step=cycle_step+1,last_receipt=$3,last_status='completed' WHERE id=$1`, [p.customer_id, p.amount, receipt]);
++}
++async function processCallback(cb: NonNullable<ReturnType<typeof parseCallback>>, rawBody: any) {
++  // Log first, outside the payment transaction, so every callback is recorded even if processing fails.
++  const lg = (await q(`INSERT INTO callback_log(checkout_request_id,merchant_request_id,result_code,payload) VALUES($1,$2,$3,$4) RETURNING id`, [cb.checkoutRequestId, cb.merchantRequestId, cb.code, JSON.stringify(redactCallback(rawBody))])).rows[0];
++  const setOutcome = (o: string, detail?: string) => q('UPDATE callback_log SET outcome=$2,detail=$3 WHERE id=$1', [lg.id, o, detail || null]);
++  const cl = await pool.connect(); let outcome = 'error', detail: string | undefined;
+   try {
+     await cl.query('BEGIN');
+-    const { rows: [p] } = await cl.query(`UPDATE payments SET status=$2,result_code=$3,result_desc=$4,receipt=$5,updated_at=now() WHERE checkout_request_id=$1 AND status='pending' RETURNING *`, [cb.checkoutRequestId, cb.status, cb.code, cb.desc, cb.receipt]);
+-    if (!p) { await cl.query('ROLLBACK'); log('Callback ignored (unknown or already processed)', cb.checkoutRequestId); await ev('callback_duplicate'); return; }
+-    const clear = `pending_checkout_id=CASE WHEN pending_checkout_id=$1 THEN NULL ELSE pending_checkout_id END, pending_since=CASE WHEN pending_checkout_id=$1 THEN NULL ELSE pending_since END`;
+-    if (cb.code === 0) {
+-      if (cb.amount && cb.amount !== p.amount) log('WARNING callback amount differs', cb.checkoutRequestId, 'expected', p.amount, 'got', cb.amount);
+-      // Credit exactly the amount our server recorded for this checkout.
+-      // Safaricom callback metadata is used for verification/logging, not for
+-      // changing the amount that was actually authorized by this payment row.
+-      await cl.query(`UPDATE customers SET paid=LEAST(authorized,paid+$2),cycle_step=cycle_step+1,last_receipt=$3,last_status='completed',${clear} WHERE id=$4`, [cb.checkoutRequestId, p.amount, cb.receipt, p.customer_id]);
+-    } else await cl.query(`UPDATE customers SET last_status=$2,${clear} WHERE id=$3`, [cb.checkoutRequestId, cb.status, p.customer_id]);
++    const p = (await cl.query('SELECT * FROM payments WHERE checkout_request_id=$1 FOR UPDATE', [cb.checkoutRequestId])).rows[0];
++    if (!p) outcome = 'unknown_checkout';
++    else if (!cb.merchantRequestId || cb.merchantRequestId !== p.merchant_request_id) outcome = 'merchant_mismatch';
++    else if (p.status !== 'pending' && p.status !== 'unconfirmed') { outcome = 'duplicate_ignored'; detail = 'payment already ' + p.status; }
++    else if (cb.code !== 0) {
++      await cl.query(`UPDATE payments SET status=$2,result_code=$3,result_desc=$4,updated_at=now() WHERE id=$1`, [p.id, cb.status, cb.code, cb.desc]);
++      await cl.query('UPDATE customers SET last_status=$2 WHERE id=$1', [p.customer_id, cb.status]);
++      outcome = cb.status;
++    } else {
++      let reason: string | null = !cb.receipt ? 'missing_receipt' : cb.amount === null ? 'missing_amount' : cb.amount !== p.amount ? 'amount_mismatch' : null;
++      if (!reason && (await cl.query('SELECT 1 FROM payments WHERE receipt=$1 AND id<>$2', [cb.receipt, p.id])).rowCount) reason = 'duplicate_receipt';
++      if (reason) {
++        // Quarantine: no credit, no cycle advance, customer stays locked until an operator reconciles it.
++        await cl.query(`UPDATE payments SET status='needs_review',review_reason=$2,callback_amount=$3,callback_receipt=$4,result_code=0,result_desc=$5,updated_at=now() WHERE id=$1`, [p.id, reason, cb.amount, cb.receipt, cb.desc]);
++        outcome = 'quarantined'; detail = reason + (cb.amount !== null ? ` (expected ${p.amount}, callback ${cb.amount})` : '');
++      } else { await completePayment(cl, p, cb.receipt as string, cb.amount as number, cb.desc); outcome = 'completed'; }
++    }
+     await cl.query('COMMIT');
+-    log('Callback', cb.checkoutRequestId, cb.status, 'code', cb.code);
+-    await ev(cb.code === 0 ? 'callback_completed' : 'callback_failed');
+-  } catch (e) { await cl.query('ROLLBACK').catch(() => {}); throw e; } finally { cl.release(); }
++  } catch (e: any) { await cl.query('ROLLBACK').catch(() => {}); await setOutcome('error', String(e.message).slice(0, 200)).catch(() => {}); throw e; } finally { cl.release(); }
++  // Committed. Bookkeeping failures below must not turn a processed callback into an error response.
++  try {
++    await setOutcome(outcome, detail);
++    const k = outcome === 'completed' ? 'callback_completed' : ['cancelled', 'failed', 'timed_out'].includes(outcome) ? 'callback_failed' : outcome === 'duplicate_ignored' ? 'callback_duplicate' : null;
++    if (k) await ev(k);
++  } catch (e: any) { log('WARNING callback bookkeeping failed', cb.checkoutRequestId, e.message); }
++  log('Callback', cb.checkoutRequestId, outcome, 'code', cb.code, detail || '');
++  return outcome;
+ }
+-app.post('/api/mpesa/callback', (req, res) => {
++app.post('/api/mpesa/callback', async (req, res) => {
+   if (E.MPESA_CALLBACK_TOKEN && req.query.token !== E.MPESA_CALLBACK_TOKEN) { log('Callback rejected: bad token'); return res.status(403).json({ ResultCode: 1, ResultDesc: 'Forbidden' }); }
+   const cb = parseCallback(req.body);
+-  res.json({ ResultCode: 0, ResultDesc: 'Accepted' });
+-  if (cb) processCallback(cb).catch(e => log('CRITICAL callback processing failed', cb.checkoutRequestId, e.message));
++  if (!cb) { log('Callback rejected: malformed payload'); return res.status(400).json({ ResultCode: 1, ResultDesc: 'Malformed callback' }); }
++  try { await processCallback(cb, req.body); res.json({ ResultCode: 0, ResultDesc: 'Accepted' }); }
++  catch (e: any) { log('CRITICAL callback processing failed', cb.checkoutRequestId, e.message); res.status(500).json({ ResultCode: 1, ResultDesc: 'Processing failed, please retry' }); }
+ });
+ 
++// Requests with no callback after UNCONFIRMED_AFTER seconds become 'unconfirmed'. That is NOT a failure: the customer
++// stays locked and a late callback is still accepted. Only a callback or an operator can resolve it.
++async function sweep() {
++  const r = await q(`UPDATE payments SET status='unconfirmed',result_desc='No callback received yet; awaiting reconciliation',updated_at=now() WHERE status IN ('initiating','pending') AND created_at < now() - make_interval(secs => $1) RETURNING id`, [UNCONFIRMED_AFTER]);
++  if (r.rowCount) log('Marked unconfirmed (no callback yet):', r.rowCount);
++}
++
+ // ---- Groups & customers ----
+-const all = async () => (await q('SELECT * FROM customers ORDER BY group_id,id')).rows.map(view);
++const all = async () => (await q(CUSTQ + ' ORDER BY c.group_id,c.id')).rows.map(view);
+ app.get('/api/groups', ah(async (req, res) => {
+   const cs = await all(), t = { customers: cs.length, completed: 0, pending: 0, authorized: 0, paid: 0, balance: 0 };
+   const groups = Array.from({ length: 16 }, (_, i) => ({ id: i + 1, name: 'Group ' + (i + 1), count: 0, max: 6, authorized: 0, paid: 0, balance: 0, completed: 0, pending: 0 }));
+@@ -163,11 +220,11 @@ app.get('/api/groups', ah(async (req, res) => {
+ }));
+ app.get('/api/groups/:id', ah(async (req, res) => {
+   const g = Number(req.params.id); if (!Number.isInteger(g) || g < 1 || g > 16) return res.status(404).json({ error: 'Group not found' });
+-  res.json({ id: g, max: 6, customers: (await q('SELECT * FROM customers WHERE group_id=$1 ORDER BY id', [g])).rows.map(view) });
++  res.json({ id: g, max: 6, customers: (await q(CUSTQ + ' WHERE c.group_id=$1 ORDER BY c.id', [g])).rows.map(view) });
+ }));
+ app.get('/api/customers', ah(async (req, res) => res.json(await all())));
+ app.get('/api/customers/:id', ah(async (req, res) => {
+-  const { rows: [c] } = await q('SELECT * FROM customers WHERE id=$1', [Number(req.params.id) || 0]);
++  const { rows: [c] } = await q(CUSTQ + ' WHERE c.id=$1', [Number(req.params.id) || 0]);
+   c ? res.json(view(c)) : res.status(404).json({ error: 'Customer not found' });
+ }));
+ function parseCust(b) {
+@@ -194,8 +251,8 @@ const saveCust = (mode) => ah(async (req, res) => {
+ app.post('/api/customers', saveCust('new'));
+ app.put('/api/customers/:id', saveCust('edit'));
+ app.delete('/api/customers/:id', ah(async (req, res) => {
+-  const r = await q(`DELETE FROM customers WHERE id=$1 AND (pending_checkout_id IS NULL OR pending_since<now()-interval '10 minutes')`, [Number(req.params.id) || 0]);
+-  r.rowCount ? res.status(204).end() : res.status(409).json({ error: 'Customer not found or has a pending STK request' });
++  const r = await q(`DELETE FROM customers c WHERE c.id=$1 AND NOT EXISTS (SELECT 1 FROM payments p WHERE p.customer_id=c.id AND p.status IN ${UNRES})`, [Number(req.params.id) || 0]);
++  r.rowCount ? res.status(204).end() : res.status(409).json({ error: 'Customer not found or has an unresolved payment request' });
+ }));
+ 
+ app.post('/api/import', ah(async (req, res) => {
+@@ -215,6 +272,29 @@ app.get('/api/payments', ah(async (req, res) => {
+   const cid = Number(req.query.customerId) || null;
+   res.json((await q(`SELECT p.*,c.name customer,c.group_id "group" FROM payments p JOIN customers c ON c.id=p.customer_id WHERE ($1::int IS NULL OR p.customer_id=$1) ORDER BY p.id DESC LIMIT 300`, [cid])).rows);
+ }));
++app.get('/api/callbacks', ah(async (req, res) => res.json((await q('SELECT id,received_at,checkout_request_id,merchant_request_id,result_code,outcome,detail FROM callback_log ORDER BY id DESC LIMIT 200')).rows)));
++// Operator reconciliation for 'unconfirmed' / 'needs_review' payments, after checking the M-Pesa statement.
++app.post('/api/payments/:id/resolve', ah(async (req, res) => {
++  const id = Number(req.params.id) || 0, o = req.body?.outcome, cl = await pool.connect();
++  try {
++    if (o !== 'paid' && o !== 'not_paid') return res.status(400).json({ error: 'outcome must be "paid" or "not_paid"' });
++    await cl.query('BEGIN');
++    const p = (await cl.query('SELECT * FROM payments WHERE id=$1 FOR UPDATE', [id])).rows[0];
++    if (!p) { await cl.query('ROLLBACK'); return res.status(404).json({ error: 'Payment not found' }); }
++    if (p.status !== 'unconfirmed' && p.status !== 'needs_review') { await cl.query('ROLLBACK'); return res.status(409).json({ error: 'Only unconfirmed or needs_review payments can be resolved (this one is ' + p.status + ')' }); }
++    if (o === 'not_paid') {
++      await cl.query(`UPDATE payments SET status='failed',result_desc='Resolved by operator: not paid',updated_at=now() WHERE id=$1`, [id]);
++      await cl.query(`UPDATE customers SET last_status='failed' WHERE id=$1`, [p.customer_id]);
++    } else {
++      const receipt = String(req.body?.receipt || '').trim(), amount = Number(req.body?.amount);
++      if (!receipt) { await cl.query('ROLLBACK'); return res.status(422).json({ error: 'receipt required' }); }
++      if (amount !== p.amount) { await cl.query('ROLLBACK'); return res.status(422).json({ error: `amount must equal the requested amount (${p.amount})` }); }
++      if ((await cl.query('SELECT 1 FROM payments WHERE receipt=$1 AND id<>$2', [receipt, id])).rowCount) { await cl.query('ROLLBACK'); return res.status(409).json({ error: 'receipt already used by another payment' }); }
++      await completePayment(cl, p, receipt, amount, 'Resolved by operator: paid');
++    }
++    await cl.query('COMMIT'); res.json({ ok: true, id, outcome: o });
++  } catch (e) { await cl.query('ROLLBACK').catch(() => {}); throw e; } finally { cl.release(); }
++}));
+ app.get('/api/health', ah(async (req, res) => { await q('SELECT 1'); res.json({ ok: true, env: isProd ? 'production' : 'sandbox', productionUnlocked: !isProd || E.PRODUCTION_VERIFIED === 'true', configProblems: configProblems(E, isProd) }); }));
+ app.get('/api/verification', ah(async (req, res) => {
+   const seen = new Map((await q('SELECT kind,count,last_at FROM events')).rows.map((r: any) => [r.kind, r]));
+@@ -229,5 +309,5 @@ app.use((err: any, req: any, res: any, next: any) => {
+   if (err.type === 'entity.parse.failed') return res.status(400).json({ error: 'Invalid JSON body' });
+   log('ERROR', req.method, req.path, err.message); res.status(500).json({ error: 'Internal server error' });
+ });
+-q(SCHEMA).then(() => app.listen(E.PORT || 3000, () => log('M-Pesa Groups on', E.PORT || 3000, isProd ? 'PRODUCTION' : 'sandbox')))
++q(SCHEMA).then(() => sweep()).then(() => { setInterval(() => sweep().catch(e => log('sweep error', e.message)), (Number(E.SWEEP_INTERVAL_SECONDS) || 15) * 1000); app.listen(E.PORT || 3000, () => log('M-Pesa Groups on', E.PORT || 3000, isProd ? 'PRODUCTION' : 'sandbox')); })
+   .catch(e => { console.error('DB init failed:', e.message); process.exit(1); });
+diff --git a/test/guard.test.ts b/test/guard.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..60f4558ee923ca03f6d4e7e7a47d1c3d592041aa
+--- /dev/null
++++ b/test/guard.test.ts
+@@ -0,0 +1,24 @@
++import { guardProblems } from '../src/guard'; import a from 'assert';
++const ok = { MPESA_ENV: 'sandbox', MPESA_BUSINESS_SHORTCODE: '174379', MPESA_TRANSACTION_TYPE: 'CustomerPayBillOnline', MPESA_CALLBACK_URL: 'https://sbx.example.test/api/mpesa/callback', DATABASE_URL: 'postgres://u:p@sandbox-db.internal/mpesa_sandbox' };
++const has = (E: any, text: string) => guardProblems(E).some(p => p.includes(text));
++a.deepStrictEqual(guardProblems(ok), []); a.deepStrictEqual(guardProblems({}), [], 'unset env behaves as sandbox with nothing configured');
++a.deepStrictEqual(guardProblems({ ...ok, MPESA_TILL_NUMBER: '174379', MPESA_BASE_URL: 'https://sandbox.safaricom.co.ke' }), []);
++a.deepStrictEqual(guardProblems({ ...ok, MPESA_BASE_URL: 'http://localhost:4010' }), []);
++// live identifiers must never appear in sandbox
++a.ok(has({ ...ok, MPESA_TILL_NUMBER: '1739052' }, 'MPESA_TILL_NUMBER'));
++a.ok(has({ ...ok, MPESA_BUSINESS_SHORTCODE: '1739052' }, 'SHORTCODE'));
++a.ok(has({ ...ok, SOME_OTHER_VAR: 'till=1739052' }, 'SOME_OTHER_VAR contains a live payment identifier'));
++a.ok(!guardProblems({ ...ok, SOME_OTHER_VAR: 'x' }).join().includes('1739052'), 'problem text must not echo the identifier');
++a.ok(!has({ ...ok, SOME_OTHER_VAR: '117390521' }, 'live payment identifier'), 'longer digit runs are not a match');
++a.ok(!has({ ...ok, MPESA_PASSKEY: 'abc1739052def' }, 'live payment identifier'), 'secret values are not scanned');
++a.ok(has({ ...ok, LIVE_PAYMENT_IDENTIFIERS: '999888', X: '999888' }, 'X contains a live payment identifier'));
++// other sandbox rules
++a.ok(has({ ...ok, MPESA_BUSINESS_SHORTCODE: '600000' }, 'SHORTCODE')); a.ok(has({ ...ok, MPESA_TRANSACTION_TYPE: 'CustomerBuyGoodsOnline' }, 'TRANSACTION_TYPE'));
++a.ok(has({ ...ok, MPESA_BASE_URL: 'https://api.safaricom.co.ke' }, 'live Safaricom API'));
++a.ok(has({ ...ok, PRODUCTION_DB_HOST: 'sandbox-db.internal' }, 'production database'));
++a.ok(has({ ...ok, MPESA_ENV: 'staging' }, 'MPESA_ENV'));
++// production side is the mirror image
++const prod = { MPESA_ENV: 'production', MPESA_BUSINESS_SHORTCODE: '600123', MPESA_TILL_NUMBER: '1739052', MPESA_TRANSACTION_TYPE: 'CustomerBuyGoodsOnline' };
++a.deepStrictEqual(guardProblems(prod), []); a.ok(has({ ...prod, MPESA_BUSINESS_SHORTCODE: '174379' }, 'sandbox shortcode'));
++a.ok(has({ ...prod, MPESA_BASE_URL: 'https://sandbox.safaricom.co.ke' }, 'MPESA_BASE_URL'));
++console.log('guard ok');
+diff --git a/test/integration.test.ts b/test/integration.test.ts
+index 694079cedd2ea9e0a40030bc2d56f2e257cf0461..0d8ae022ade831bfca86414dea0492032dcab22e 100644
+--- a/test/integration.test.ts
++++ b/test/integration.test.ts
+@@ -1,47 +1,145 @@
+ // End-to-end test against REAL Postgres + the real server, with Safaricom mocked locally.
+-// Run on a THROWAWAY database:  DATABASE_URL=postgres://... npm run test:integration
+-import http from 'http'; import { spawn } from 'child_process'; import a from 'assert';
++// These are MANUALLY INJECTED callbacks: they test our handler, not Safaricom delivery.
++// Run ONLY on a throwaway database:  DATABASE_URL=postgres://... npm run test:integration
++import http from 'http'; import { spawn, spawnSync } from 'child_process'; import a from 'assert'; import { Pool } from 'pg';
+ if (!process.env.DATABASE_URL) { console.log('SKIP: set DATABASE_URL (throwaway database) to run'); process.exit(0); }
+ const sent: any[] = []; let n = 0;
++// Mock Daraja. Phone ...601 is rejected outright (HTTP 400); phone ...602 gets HTTP 500 (outcome unknown).
+ const daraja = http.createServer((q, s) => { let b = ''; q.on('data', d => b += d); q.on('end', () => { s.setHeader('content-type', 'application/json');
+   if (q.url!.startsWith('/oauth')) return s.end(JSON.stringify({ access_token: 'test-token', expires_in: '3599' }));
+-  const body = JSON.parse(b); sent.push(body); n++; s.end(JSON.stringify({ MerchantRequestID: 'm' + n, CheckoutRequestID: 'ws_CO_' + n, ResponseCode: '0', ResponseDescription: 'Success', CustomerMessage: 'Success' })); }); }).listen(4010);
+-const env = { ...process.env, PORT: '3100', MPESA_ENV: 'sandbox', MPESA_BASE_URL: 'http://localhost:4010', MPESA_CONSUMER_KEY: 'k', MPESA_CONSUMER_SECRET: 's', MPESA_PASSKEY: 'p', MPESA_BUSINESS_SHORTCODE: '174379', MPESA_TILL_NUMBER: '1739052', MPESA_TRANSACTION_TYPE: 'CustomerPayBillOnline', MPESA_CALLBACK_URL: 'https://example.test/api/mpesa/callback', MPESA_CALLBACK_TOKEN: 'tok', ADMIN_PASSWORD: '' };
++  const body = JSON.parse(b); sent.push(body);
++  if (body.PhoneNumber === '254700000601') { s.statusCode = 400; return s.end(JSON.stringify({ requestId: 'r', errorCode: '400.002.02', errorMessage: 'Bad Request - Invalid PhoneNumber' })); }
++  if (body.PhoneNumber === '254700000602') { s.statusCode = 500; return s.end(JSON.stringify({ errorMessage: 'upstream timeout' })); }
++  n++; s.end(JSON.stringify({ MerchantRequestID: 'm' + n, CheckoutRequestID: 'ws_CO_' + n, ResponseCode: '0', ResponseDescription: 'Success', CustomerMessage: 'Success' })); }); }).listen(4010);
++// No live Till anywhere in this sandbox configuration.
++const env = { ...process.env, PORT: '3100', MPESA_ENV: 'sandbox', MPESA_BASE_URL: 'http://localhost:4010', MPESA_CONSUMER_KEY: 'k', MPESA_CONSUMER_SECRET: 's', MPESA_PASSKEY: 'p', MPESA_BUSINESS_SHORTCODE: '174379', MPESA_TRANSACTION_TYPE: 'CustomerPayBillOnline', MPESA_CALLBACK_URL: 'https://example.test/api/mpesa/callback', MPESA_CALLBACK_TOKEN: 'tok', ADMIN_PASSWORD: '', UNCONFIRMED_AFTER_SECONDS: '6', SWEEP_INTERVAL_SECONDS: '1' };
++delete (env as any).MPESA_TILL_NUMBER;
+ const srv = spawn('npx', ['tsx', 'src/server.ts'], { env, stdio: 'inherit' });
+-const U = 'http://localhost:3100/api', j = async (p: string, body?: any, method?: string) => { const r = await fetch(U + p, { method: method || (body ? 'POST' : 'GET'), headers: { 'Content-Type': 'application/json' }, body: body ? JSON.stringify(body) : undefined }); return { s: r.status, d: await r.json().catch(() => ({})) as any }; };
+-const cb = (id: string, code: number, extra: any[] = []) => fetch(U + '/mpesa/callback?token=tok', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ Body: { stkCallback: { MerchantRequestID: 'x', CheckoutRequestID: id, ResultCode: code, ResultDesc: 'r', ...(code === 0 ? { CallbackMetadata: { Item: extra } } : {}) } } }) });
++const db = new Pool({ connectionString: process.env.DATABASE_URL });
++const U = 'http://localhost:3100/api', HDR = { 'Content-Type': 'application/json' }, sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
++const j = async (p: string, body?: any, method?: string) => { const r = await fetch(U + p, { method: method || (body ? 'POST' : 'GET'), headers: HDR, body: body ? JSON.stringify(body) : undefined }); return { s: r.status, d: await r.json().catch(() => ({})) as any }; };
++const post = (b: any, token = 'tok') => fetch(U + '/mpesa/callback?token=' + token, { method: 'POST', headers: HDR, body: JSON.stringify(b) });
++const items = (amount: number, receipt: string) => [{ Name: 'Amount', Value: amount }, { Name: 'MpesaReceiptNumber', Value: receipt }, { Name: 'PhoneNumber', Value: 254712345678 }];
++const cbBody = (p: any, code: number, it?: any[]) => ({ Body: { stkCallback: { MerchantRequestID: p.merchant_request_id, CheckoutRequestID: p.checkout_request_id, ResultCode: code, ResultDesc: 'r', ...(code === 0 ? { CallbackMetadata: { Item: it || [] } } : {}) } } });
++const cb200 = async (p: any, code: number, it?: any[]) => a.strictEqual((await post(cbBody(p, code, it))).status, 200);
+ const cust = async (name: string) => (await j('/customers')).d.find((c: any) => c.name === name);
++const lastPay = async (name: string) => (await j('/payments')).d.find((p: any) => p.customer === name);
++const push = async (name: string) => j('/stk-push', { customerId: (await cust(name)).id });
++const outcomes = async (crid: string) => (await db.query('SELECT outcome FROM callback_log WHERE checkout_request_id=$1 ORDER BY id', [crid])).rows.map((r: any) => r.outcome);
++const count = async (sql: string, p: any[] = []) => Number((await db.query(sql, p)).rows[0].c);
+ const H = 'Group,Customer Name,M-Pesa Number,Authorized Total,Amount Already Paid';
+ (async () => {
+-  for (let i = 0; i < 60; i++) { try { if ((await j('/health')).s === 200) break; } catch {} await new Promise(r => setTimeout(r, 500)); }
++  for (let i = 0; i < 60; i++) { try { if ((await j('/health')).s === 200) break; } catch {} await sleep(500); }
+   a.strictEqual((await j('/customers')).d.length, 0, 'database must be empty (use a throwaway DB)');
+-  a.strictEqual((await j('/groups')).d.groups.length, 16);
++  a.strictEqual((await j('/groups')).d.groups.length, 16, '16 groups');
++
++  // ---- limits ----
+   const big = await j('/import', { csv: [H, ...Array.from({ length: 8 }, (_, i) => `Group 2,X${i},07123456${10 + i},500,0`)].join('\n') });
+   a.strictEqual(big.s, 422); a.ok(big.d.errors.includes('Group 2 contains 8 customers. Maximum allowed is 6.')); a.strictEqual((await j('/customers')).d.length, 0);
+-  const imp = await j('/import', { csv: [H, 'Group 1,A One,0712345678,1470,0', 'Group 1,B Two,0112345678,980,500', 'Group 1,C Three,254712345679,250,0', 'Group 1,D Done,254112345679,500,500'].join('\n') });
+-  a.strictEqual(imp.d.imported, 4);
+-  for (let i = 0; i < 2; i++) a.strictEqual((await j('/customers', { group: 1, name: 'F' + i, phone: '07000000' + (10 + i), authorized: 100, paid: 0 })).s, 201);
+-  a.strictEqual((await j('/customers', { group: 1, name: 'G', phone: '0700000099', authorized: 100 })).s, 422, '7th customer in group rejected');
++  a.strictEqual((await j('/import', { csv: [H, 'Group 1,A One,0712345678,1470,0', 'Group 1,B Two,0112345678,980,500', 'Group 1,C Three,254712345679,250,0', 'Group 1,D Done,254112345679,500,500', 'Group 1,R Reject,254700000601,500,0', 'Group 1,N Net,254700000602,500,0'].join('\n') })).d.imported, 6);
++  a.strictEqual((await j('/import', { csv: [H, ...['Q1', 'Q2', 'Q3', 'U1', 'U2', 'F1'].map((nm, i) => `Group 3,${nm},070000070${i + 1},500,0`)].join('\n') })).d.imported, 6);
++  a.strictEqual((await j('/customers', { group: 1, name: 'G7', phone: '0700000099', authorized: 100 })).s, 422, '7th customer in group rejected');
++
++  // ---- group send: amounts, config, STK accepted is NOT completed ----
+   const g = await j('/stk-push-group', { groupId: 1 });
+-  a.deepStrictEqual([g.d.sent, g.d.failed, g.d.skipped], [5, 0, 1]);
++  a.deepStrictEqual([g.d.sent, g.d.failed, g.d.skipped], [3, 2, 1], 'A,B,C sent; R,N failed; D skipped');
+   const amt = (nm: string) => g.d.results.find((r: any) => r.customer === nm).amount;
+   a.deepStrictEqual([amt('A One'), amt('B Two'), amt('C Three'), amt('D Done')], [500, 480, 250, 0]);
+-  a.ok(sent.every(b => b.AccountReference.length <= 12 && b.CallBackURL.endsWith('?token=tok')));
++  a.ok(sent.every(b => b.BusinessShortCode === '174379' && b.PartyB === '174379' && b.TransactionType === 'CustomerPayBillOnline' && b.AccountReference.length <= 12 && b.CallBackURL.endsWith('?token=tok')));
++  for (const nm of ['A One', 'B Two', 'C Three']) { const c = await cust(nm), p = await lastPay(nm); a.deepStrictEqual([p.status, c.status, p.receipt], ['pending', 'Pending', null], nm + ' accepted != completed'); }
++  a.strictEqual((await cust('A One')).paid, 0);
+   a.strictEqual((await j('/stk-push-group', { groupId: 1 })).d.sent, 0, 'pending customers not re-prompted');
+-  const A = await cust('A One'); a.strictEqual((await j('/stk-push', { customerId: A.id })).s, 409);
+-  const crid = g.d.results.find((r: any) => r.customer === 'A One').checkoutRequestId;
+-  a.strictEqual((await cb(crid, 0, [{ Name: 'Amount', Value: 999 }, { Name: 'MpesaReceiptNumber', Value: 'RCPT1' }])).status, 200);
+-  await new Promise(r => setTimeout(r, 500));
+-  let A2 = await cust('A One'); a.deepStrictEqual([A2.paid, A2.status, A2.nextAmount, A2.lastReceipt], [500, 'Ready', 490, 'RCPT1']);
+-  await cb(crid, 0, [{ Name: 'Amount', Value: 500 }, { Name: 'MpesaReceiptNumber', Value: 'RCPT1' }]); await new Promise(r => setTimeout(r, 500));
+-  a.strictEqual((await cust('A One')).paid, 500, 'duplicate callback must not double count');
+-  a.strictEqual((await fetch(U + '/mpesa/callback?token=bad', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })).status, 403);
+-  const bcr = g.d.results.find((r: any) => r.customer === 'B Two').checkoutRequestId; await cb(bcr, 1032); await new Promise(r => setTimeout(r, 500));
+-  const B = await cust('B Two'); a.deepStrictEqual([B.paid, B.status], [500, 'Cancelled']);
+-  const ccr = g.d.results.find((r: any) => r.customer === 'C Three').checkoutRequestId; await cb(ccr, 0, [{ Name: 'Amount', Value: 250 }, { Name: 'MpesaReceiptNumber', Value: 'RCPT3' }]); await new Promise(r => setTimeout(r, 500));
+-  const C = await cust('C Three'); a.deepStrictEqual([C.balance, C.status], [0, 'Completed']); a.strictEqual((await j('/stk-push', { customerId: C.id })).s, 409);
+-  const pay = (await j('/payments')).d; a.ok(pay.length >= 5 && pay.some((p: any) => p.status === 'completed' && p.receipt === 'RCPT1') && pay.some((p: any) => p.status === 'cancelled'));
+-  const v = (await j('/verification')).d; a.ok(v.allDone, 'verification checklist should be complete');
+-  a.strictEqual((await j('/nope')).s, 404); a.strictEqual((await fetch(U + '/import', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{bad' })).status, 400);
++  a.strictEqual((await push('A One')).s, 409);
++
++  // ---- definitive rejection releases the lock; ambiguous outcome keeps it ----
++  const R = await cust('R Reject'); a.deepStrictEqual([(await lastPay('R Reject')).status, R.status], ['failed', 'Failed']); a.strictEqual((await push('R Reject')).s, 502, 'rejected customer is not locked');
++  const N = await cust('N Net'); a.deepStrictEqual([(await lastPay('N Net')).status, N.status], ['unconfirmed', 'Unconfirmed']); a.strictEqual((await push('N Net')).s, 409, 'unknown outcome stays locked');
++
++  // ---- A One: rejected callbacks, then the 500 -> 490 -> 480 cycle ----
++  const pA = await lastPay('A One');
++  a.strictEqual((await post({ Body: { stkCallback: { MerchantRequestID: 'WRONG', CheckoutRequestID: pA.checkout_request_id, ResultCode: 0, ResultDesc: 'r', CallbackMetadata: { Item: items(500, 'RCPT-A1') } } } })).status, 200);
++  a.deepStrictEqual([(await cust('A One')).paid, (await lastPay('A One')).status], [0, 'pending'], 'merchant ID mismatch changes nothing');
++  a.ok((await outcomes(pA.checkout_request_id)).includes('merchant_mismatch'));
++  a.strictEqual((await post({ Body: { stkCallback: { MerchantRequestID: 'x', CheckoutRequestID: 'ws_CO_unknown', ResultCode: 0, ResultDesc: 'r', CallbackMetadata: { Item: items(500, 'RCPT-X') } } } })).status, 200);
++  a.deepStrictEqual(await outcomes('ws_CO_unknown'), ['unknown_checkout']); a.strictEqual((await cust('A One')).paid, 0, 'unknown checkout changes nothing');
++  await cb200(pA, 0, items(500, 'RCPT-A1'));
++  let A = await cust('A One'); a.deepStrictEqual([A.paid, A.status, A.nextAmount, A.lastReceipt], [500, 'Ready', 490, 'RCPT-A1']);
++  await cb200(pA, 0, items(500, 'RCPT-A1')); a.strictEqual((await cust('A One')).paid, 500, 'sequential duplicate must not double count'); a.ok((await outcomes(pA.checkout_request_id)).includes('duplicate_ignored'));
++  const s2 = await push('A One'); a.deepStrictEqual([s2.s, s2.d.amount], [200, 490]); const pA2 = await lastPay('A One');
++  const burst = await Promise.all(Array.from({ length: 8 }, () => post(cbBody(pA2, 0, items(490, 'RCPT-A2'))))); a.ok(burst.every(r => r.status === 200));
++  a.strictEqual((await cust('A One')).paid, 990, 'concurrent duplicates credit exactly once');
++  const oc = await outcomes(pA2.checkout_request_id); a.deepStrictEqual([oc.filter(o => o === 'completed').length, oc.filter(o => o === 'duplicate_ignored').length], [1, 7]);
++  const s3 = await push('A One'); a.deepStrictEqual([s3.s, s3.d.amount], [200, 480]); await cb200(await lastPay('A One'), 0, items(480, 'RCPT-A3'));
++  A = await cust('A One'); a.deepStrictEqual([A.paid, A.balance, A.status], [1470, 0, 'Completed']); a.strictEqual((await push('A One')).s, 409, 'zero balance skipped');
++
++  // ---- B Two: cancelled, out-of-order success, timed out, failed: never credited, cycle never advances ----
++  const pB = await lastPay('B Two'); await cb200(pB, 1032);
++  let B = await cust('B Two'); a.deepStrictEqual([B.paid, B.status, B.nextAmount, B.cycleStep, (await lastPay('B Two')).status], [500, 'Cancelled', 480, 1, 'cancelled']);
++  await cb200(pB, 0, items(480, 'RCPT-B-LATE')); B = await cust('B Two');
++  a.deepStrictEqual([B.paid, (await lastPay('B Two')).status], [500, 'cancelled'], 'success after cancel is ignored'); a.ok((await outcomes(pB.checkout_request_id)).includes('duplicate_ignored'));
++  a.strictEqual((await push('B Two')).d.amount, 480); await cb200(await lastPay('B Two'), 1037);
++  B = await cust('B Two'); a.deepStrictEqual([B.paid, B.status, B.cycleStep, (await lastPay('B Two')).status], [500, 'Timed out', 1, 'timed_out']);
++  a.strictEqual((await push('B Two')).d.amount, 480); await cb200(await lastPay('B Two'), 1);
++  B = await cust('B Two'); a.deepStrictEqual([B.paid, B.status, B.cycleStep, (await lastPay('B Two')).status], [500, 'Failed', 1, 'failed']);
++
++  // ---- C Three: final payment capped at remaining balance ----
++  await cb200(await lastPay('C Three'), 0, items(250, 'RCPT-C')); const C = await cust('C Three'); a.deepStrictEqual([C.paid, C.balance, C.status], [250, 0, 'Completed']);
++
++  // ---- Group 3: quarantine cases ----
++  const g3 = await j('/stk-push-group', { groupId: 3 }); a.strictEqual(g3.d.sent, 6);
++  const pQ1 = await lastPay('Q1'), pQ2 = await lastPay('Q2'), pQ3 = await lastPay('Q3'), pF = await lastPay('F1');
++  await cb200(pQ1, 0, [{ Name: 'Amount', Value: 500 }]); // missing receipt
++  await cb200(pQ2, 0, items(999, 'RCPT-Q2')); // KSh 999 against a KSh 500 request
++  await cb200(pQ3, 0, items(500, 'RCPT-A1')); // receipt already used by A One
++  for (const [nm, reason] of [['Q1', 'missing_receipt'], ['Q2', 'amount_mismatch'], ['Q3', 'duplicate_receipt']]) {
++    const c = await cust(nm), r = (await db.query('SELECT * FROM payments WHERE customer_id=$1', [c.id])).rows[0];
++    a.deepStrictEqual([c.paid, c.cycleStep, c.status, r.status, r.review_reason], [0, 0, 'Needs review', 'needs_review', reason], nm);
++    a.strictEqual((await push(nm)).s, 409, nm + ' stays locked');
++  }
++  a.strictEqual(await count(`SELECT count(*) c FROM payments WHERE receipt='RCPT-A1'`), 1, 'receipt unique');
++
++  // ---- database failure: not acknowledged, nothing committed, retry succeeds once ----
++  await db.query(`CREATE OR REPLACE FUNCTION test_forced_failure() RETURNS trigger AS $$ BEGIN RAISE EXCEPTION 'forced failure'; END $$ LANGUAGE plpgsql`);
++  await db.query('CREATE TRIGGER test_forced_failure_trg BEFORE UPDATE ON customers FOR EACH ROW EXECUTE FUNCTION test_forced_failure()');
++  const fail = await post(cbBody(pF, 0, items(500, 'RCPT-F1'))); a.strictEqual(fail.status, 500, 'DB failure must not be acknowledged as success'); a.strictEqual((await fail.json() as any).ResultCode, 1);
++  const Fp = await lastPay('F1'); a.ok(['pending', 'unconfirmed'].includes(Fp.status) && Fp.receipt === null && (await cust('F1')).paid === 0, 'nothing committed');
++  a.ok((await outcomes(pF.checkout_request_id)).includes('error'));
++  await db.query('DROP TRIGGER test_forced_failure_trg ON customers');
++  await cb200(pF, 0, items(500, 'RCPT-F1')); a.deepStrictEqual([(await cust('F1')).paid, (await lastPay('F1')).status], [500, 'completed']);
++  await cb200(pF, 0, items(500, 'RCPT-F1')); a.strictEqual((await cust('F1')).paid, 500, 'retry then duplicate credit once');
++
++  // ---- missing callbacks: never auto-completed; late callback still accepted ----
++  await sleep(9000);
++  for (const nm of ['U1', 'U2']) { const c = await cust(nm); a.deepStrictEqual([(await lastPay(nm)).status, c.status, c.paid], ['unconfirmed', 'Unconfirmed', 0], nm + ' missing callback'); a.strictEqual((await push(nm)).s, 409); }
++  await cb200(await lastPay('U1'), 0, items(500, 'RCPT-U1')); a.deepStrictEqual([(await cust('U1')).paid, (await lastPay('U1')).status], [500, 'completed'], 'late callback accepted once');
++
++  // ---- operator reconciliation ----
++  const pU2 = await lastPay('U2'); a.strictEqual((await j(`/payments/${pU2.id}/resolve`, { outcome: 'not_paid' })).s, 200);
++  a.deepStrictEqual([(await cust('U2')).paid, (await lastPay('U2')).status], [0, 'failed']); a.strictEqual((await push('U2')).s, 200, 'lock released after operator resolves');
++  a.strictEqual((await j(`/payments/${(await lastPay('U2')).id}/resolve`, { outcome: 'not_paid' })).s, 409, 'pending payments cannot be resolved by hand');
++  const q2id = (await db.query(`SELECT id FROM payments WHERE review_reason='amount_mismatch'`)).rows[0].id;
++  a.strictEqual((await j(`/payments/${q2id}/resolve`, { outcome: 'paid', receipt: 'RCPT-Q2-OK', amount: 999 })).s, 422); a.strictEqual((await cust('Q2')).paid, 0);
++  a.strictEqual((await j(`/payments/${q2id}/resolve`, { outcome: 'paid', receipt: 'RCPT-A1', amount: 500 })).s, 409, 'used receipt rejected');
++  a.strictEqual((await j(`/payments/${q2id}/resolve`, { outcome: 'paid', receipt: 'RCPT-Q2-OK', amount: 500 })).s, 200); a.strictEqual((await cust('Q2')).paid, 500);
++  a.strictEqual((await j(`/payments/${q2id}/resolve`, { outcome: 'paid', receipt: 'RCPT-Q2-OK2', amount: 500 })).s, 409, 'cannot resolve twice'); a.strictEqual((await cust('Q2')).paid, 500);
++
++  // ---- transport-level rejections ----
++  a.strictEqual((await post({}, 'bad')).status, 403); a.strictEqual((await post({})).status, 400);
++  a.strictEqual((await post({ Body: { stkCallback: { CheckoutRequestID: 'x', ResultCode: 'abc' } } })).status, 400);
++
++  // ---- invariants ----
++  const grp = (await j('/groups')).d.groups; a.strictEqual(grp.length, 16); a.ok(grp.every((x: any) => x.count <= 6)); a.deepStrictEqual([grp[0].count, grp[2].count], [6, 6]);
++  const paid: Record<string, number> = { 'A One': 1470, 'B Two': 500, 'C Three': 250, 'D Done': 500, 'R Reject': 0, 'N Net': 0, Q1: 0, Q2: 500, Q3: 0, U1: 500, U2: 0, F1: 500 };
++  for (const [nm, p] of Object.entries(paid)) a.strictEqual((await cust(nm)).paid, p, 'final paid ' + nm);
++  a.strictEqual(await count(`SELECT count(*) c FROM payments WHERE status='completed' AND receipt IS NULL`), 0);
++  a.strictEqual(await count(`SELECT count(*) c FROM (SELECT receipt FROM payments WHERE receipt IS NOT NULL GROUP BY receipt HAVING count(*)>1) x`), 0);
++  a.strictEqual(await count(`SELECT count(*) c FROM (SELECT customer_id FROM payments WHERE status IN ('initiating','pending','unconfirmed','needs_review') GROUP BY customer_id HAVING count(*)>1) x`), 0);
++  a.strictEqual(await count(`SELECT count(*) c FROM customers WHERE paid>authorized`), 0);
++  a.strictEqual(await count(`SELECT count(*) c FROM callback_log WHERE payload::text LIKE '%254712345678%'`), 0, 'phone numbers are masked in the callback log');
++  a.strictEqual((await j('/nope')).s, 404); a.strictEqual((await fetch(U + '/import', { method: 'POST', headers: HDR, body: '{bad' })).status, 400);
++
++  // ---- startup guard is wired in: sandbox + live Till must refuse to boot ----
++  const g1 = spawnSync('npx', ['tsx', 'src/server.ts'], { env: { ...env, PORT: '3101', MPESA_TILL_NUMBER: '1739052' }, encoding: 'utf8', timeout: 60000 });
++  a.ok(g1.status !== 0 && String(g1.stderr).includes('STARTUP GUARD FAILED'), 'guard must stop sandbox with live Till');
+   console.log('integration ok');
+-})().then(() => 0, e => { console.error(e); return 1; }).then(code => { srv.kill(); daraja.close(); process.exit(code); });
++})().then(() => 0, e => { console.error(e); return 1; }).then(async code => { srv.kill(); daraja.close(); await db.end().catch(() => {}); process.exit(code); });
+diff --git a/test/mpesa.test.ts b/test/mpesa.test.ts
+index 2c5ca8e5546f8c861449bfb3732ceba929a50a9d..381fdaeef54cdf3239fc66130f745678f3fbddd5 100644
+--- a/test/mpesa.test.ts
++++ b/test/mpesa.test.ts
+@@ -1,7 +1,7 @@
+-import { buildStkBody, parseCallback, configProblems, callbackUrl } from '../src/mpesa'; import a from 'assert';
+-const E = { MPESA_BUSINESS_SHORTCODE: '123456', MPESA_TILL_NUMBER: '1739052', MPESA_PASSKEY: 'pk', MPESA_CONSUMER_KEY: 'k', MPESA_CONSUMER_SECRET: 's', MPESA_CALLBACK_URL: 'https://x.test/api/mpesa/callback', MPESA_CALLBACK_TOKEN: 't0k', MPESA_TRANSACTION_TYPE: 'CustomerBuyGoodsOnline' };
++import { buildStkBody, parseCallback, configProblems, callbackUrl, redactCallback } from '../src/mpesa'; import a from 'assert';
++const E = { MPESA_BUSINESS_SHORTCODE: '123456', MPESA_TILL_NUMBER: '5550123', MPESA_PASSKEY: 'pk', MPESA_CONSUMER_KEY: 'k', MPESA_CONSUMER_SECRET: 's', MPESA_CALLBACK_URL: 'https://x.test/api/mpesa/callback', MPESA_CALLBACK_TOKEN: 't0k', MPESA_TRANSACTION_TYPE: 'CustomerBuyGoodsOnline' };
+ const b = buildStkBody(E, true, { name: 'Wanjiku Kamau-Njeri Ltd', phone: '254712345678' }, 500, '20261002120000');
+-a.strictEqual(b.BusinessShortCode, '123456'); a.strictEqual(b.PartyB, '1739052'); a.strictEqual(b.PartyA, '254712345678'); a.strictEqual(b.TransactionType, 'CustomerBuyGoodsOnline');
++a.strictEqual(b.BusinessShortCode, '123456'); a.strictEqual(b.PartyB, '5550123'); a.strictEqual(b.PartyA, '254712345678'); a.strictEqual(b.TransactionType, 'CustomerBuyGoodsOnline');
+ a.strictEqual(b.Password, Buffer.from('123456pk20261002120000').toString('base64')); a.ok(b.AccountReference.length <= 12); a.strictEqual(b.CallBackURL, 'https://x.test/api/mpesa/callback?token=t0k');
+ a.strictEqual(buildStkBody({ ...E, MPESA_TRANSACTION_TYPE: 'CustomerPayBillOnline' }, false, { name: 'A', phone: '254712345678' }, 5, 'ts').PartyB, '123456');
+ a.deepStrictEqual(configProblems(E, true), []); a.ok(configProblems({}, true).length >= 6); a.ok(configProblems({ ...E, MPESA_CALLBACK_URL: 'http://x' }, true).some(p => p.includes('https')));
+@@ -9,6 +9,18 @@ a.ok(configProblems({ ...E, MPESA_CALLBACK_TOKEN: '' }, true).includes('missing
+ const ok = parseCallback({ Body: { stkCallback: { MerchantRequestID: 'm', CheckoutRequestID: 'ws_1', ResultCode: 0, ResultDesc: 'ok', CallbackMetadata: { Item: [{ Name: 'Amount', Value: 490 }, { Name: 'MpesaReceiptNumber', Value: 'QWE123' }] } } } });
+ a.deepStrictEqual([ok?.status, ok?.amount, ok?.receipt, ok?.checkoutRequestId], ['completed', 490, 'QWE123', 'ws_1']);
+ a.strictEqual(parseCallback({ Body: { stkCallback: { CheckoutRequestID: 'x', ResultCode: 1032, ResultDesc: 'cancelled' } } })?.status, 'cancelled');
+-const f = parseCallback({ Body: { stkCallback: { CheckoutRequestID: 'x', ResultCode: 1, ResultDesc: 'low balance' } } }); a.deepStrictEqual([f?.status, f?.amount, f?.receipt], ['failed', 0, null]);
++const f = parseCallback({ Body: { stkCallback: { CheckoutRequestID: 'x', ResultCode: 1, ResultDesc: 'low balance' } } }); a.deepStrictEqual([f?.status, f?.amount, f?.receipt], ['failed', null, null]);
+ a.strictEqual(parseCallback({}), null); a.strictEqual(parseCallback(null), null); a.strictEqual(parseCallback({ Body: { stkCallback: {} } }), null);
++// hardened parsing: merchant id, timeout code, missing receipt/amount, invalid result code, phone redaction
++const mk = (o: any) => parseCallback({ Body: { stkCallback: { MerchantRequestID: 'mr1', CheckoutRequestID: 'ws_2', ResultDesc: 'd', ...o } } });
++a.strictEqual(mk({ ResultCode: 0, CallbackMetadata: { Item: [{ Name: 'Amount', Value: 500 }, { Name: 'MpesaReceiptNumber', Value: ' R1 ' }] } })?.merchantRequestId, 'mr1');
++a.strictEqual(mk({ ResultCode: 0, CallbackMetadata: { Item: [{ Name: 'Amount', Value: 500 }, { Name: 'MpesaReceiptNumber', Value: ' R1 ' }] } })?.receipt, 'R1');
++a.strictEqual(mk({ ResultCode: 1037 })?.status, 'timed_out'); a.strictEqual(mk({ ResultCode: '1032' })?.status, 'cancelled'); a.strictEqual(mk({ ResultCode: 2001 })?.status, 'failed');
++const noRcpt = mk({ ResultCode: 0, CallbackMetadata: { Item: [{ Name: 'Amount', Value: 500 }] } }); a.deepStrictEqual([noRcpt?.receipt, noRcpt?.amount], [null, 500]);
++const noAmt = mk({ ResultCode: 0, CallbackMetadata: { Item: [{ Name: 'MpesaReceiptNumber', Value: 'R2' }] } }); a.deepStrictEqual([noAmt?.receipt, noAmt?.amount], ['R2', null]);
++a.strictEqual(mk({ ResultCode: 0 })?.amount, null);
++a.strictEqual(mk({}), null); a.strictEqual(mk({ ResultCode: 'abc' }), null);
++a.strictEqual(parseCallback({ Body: { stkCallback: { CheckoutRequestID: 'x', ResultCode: 0 } } })?.merchantRequestId, null);
++const red = redactCallback({ Body: { stkCallback: { CallbackMetadata: { Item: [{ Name: 'PhoneNumber', Value: 254712345678 }, { Name: 'Amount', Value: 5 }] } } } });
++a.strictEqual(red.Body.stkCallback.CallbackMetadata.Item[0].Value, '*********678'); a.strictEqual(red.Body.stkCallback.CallbackMetadata.Item[1].Value, 5); a.strictEqual(redactCallback(undefined), null);
+ console.log('mpesa ok');
