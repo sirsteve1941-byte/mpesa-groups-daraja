@@ -1,4 +1,5 @@
-name: Validate sandbox patch
+
+name: Validate patched sandbox code
 
 on:
   push:
@@ -14,27 +15,51 @@ jobs:
     if: github.ref == 'refs/heads/sandbox-hardening'
     runs-on: ubuntu-latest
 
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: mpesa_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      DATABASE_URL: postgres://postgres:test@localhost:5432/mpesa_test
+
     steps:
       - name: Checkout sandbox branch
         uses: actions/checkout@v4
         with:
           ref: sandbox-hardening
+          persist-credentials: false
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 22
 
-      - name: Check patch applies cleanly
+      - name: Check and apply patch in temporary runner
         shell: bash
         run: |
           set -euo pipefail
           test -f sandbox-hardening.patch
           git apply --check sandbox-hardening.patch
+          git apply sandbox-hardening.patch
 
       - name: Install dependencies
         run: npm install --include=dev --no-audit --no-fund
 
-      - name: Run unit tests
+      - name: Typecheck patched code
+        run: npm run typecheck
+
+      - name: Test patched code
         run: npm test
 
+      - name: Integration tests
+        run: npm run test:integration
