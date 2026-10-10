@@ -1,3 +1,4 @@
+
 name: Apply sandbox hardening patch
 
 on:
@@ -7,35 +8,75 @@ permissions:
   contents: write
 
 jobs:
-  apply:
+  apply-and-test:
+    if: github.ref == 'refs/heads/sandbox-hardening'
     runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: mpesa_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
     env:
-      TARGET_BRANCH: ${{ github.ref_name }}
+      DATABASE_URL: postgres://postgres:test@localhost:5432/mpesa_test
+
     steps:
-      - name: Refuse any branch except sandbox-hardening
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [[ "$TARGET_BRANCH" != "sandbox-hardening" ]]; then
-            echo "Refusing to run outside sandbox-hardening (selected: $TARGET_BRANCH)."
-            exit 1
-          fi
-      - name: Checkout selected branch
+      - name: Checkout sandbox branch
         uses: actions/checkout@v4
-      - name: Check and apply patch
+        with:
+          ref: sandbox-hardening
+
+      - name: Verify branch and patch
         shell: bash
         run: |
           set -euo pipefail
+          test "$GITHUB_REF_NAME" = "sandbox-hardening"
           test -f sandbox-hardening.patch
           git apply --check sandbox-hardening.patch
+
+      - name: Apply patch
+        shell: bash
+        run: |
+          set -euo pipefail
           git apply sandbox-hardening.patch
-         rm -f sandbox-hardening.patch
+          rm -f sandbox-hardening.patch
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install dependencies
+        run: npm install --include=dev --no-audit --no-fund
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Unit tests
+        run: npm test
+
+      - name: Integration tests
+        run: npm run test:integration
+
+      - name: Commit and push tested changes
+        shell: bash
+        run: |
+          set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add -A
           if git diff --cached --quiet; then
-            echo "No changes to commit; refusing to create an empty commit."
+            echo "No changes to commit."
             exit 1
           fi
           git commit -m "Sandbox hardening: validate and deduplicate payment callbacks"
-          git push
+          git push origin HEAD:sandbox-hardening
